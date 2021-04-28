@@ -37,8 +37,8 @@ type URLCombo struct {
 type TimeClosure struct {
 	URL string
 	Type string
-	start time.Time
-	end time.Time
+	runtime time.Duration
+	pending int
 
 }
 
@@ -46,8 +46,9 @@ var outboundReqs = make([]int,0)
 var hammers []Hammer
 var s1 = rand.NewSource(time.Now().UnixNano())
 var r1 = rand.New(s1)
-var closures []TimeClosure
+var closures [][]TimeClosure
 var countChannel = make([]chan int,0)
+var activeHammers []Hammer
 
 
 func takeURLInfo()URL{
@@ -160,7 +161,7 @@ func hammerToFileString(hammer Hammer)string{
 }
 
 func hammerToUserString(hammer Hammer)string{
-	return fmt.Sprintf("Name: %s, Base URL: %s, runtime: %s, %d requests/seconds, %d variable requests\n",hammer.name,hammer.url.Base,timeToString(hammer.time),hammer.perSecond,len(hammer.url.Appendages))
+	return fmt.Sprintf("Name: %s, Base URL: %s, runtime: %s, %d requests/second, %d variable requests\n",hammer.name,hammer.url.Base,timeToString(hammer.time),hammer.perSecond,len(hammer.url.Appendages))
 }
 
 
@@ -190,15 +191,14 @@ func timeToSeconds(time fmtTime)int{
 }
 
 func logCall(start time.Time,end time.Time,URL string,reqType string,outboundIdx int){
-	closures = append(closures,TimeClosure{
+	closures[outboundIdx] = append(closures[outboundIdx],TimeClosure{
 		URL:   URL,
 		Type:  reqType,
-		start: start,
-		end:   end,
+		runtime: end.Sub(start),
+		pending: outboundReqs[outboundIdx],
+
 	})
 	countChannel[outboundIdx]<--1
-	fmt.Println(URL)
-	fmt.Println(end.Sub(start))
 }
 
 func makeTypedRequest(URL string,reqType string,outboundIdx int){
@@ -221,21 +221,52 @@ func runHammer(hammer Hammer,outboundIndex int){
 	waitTime := int(1.0/float64(hammer.perSecond)*1000)
 	for i:=0;i<timeToSeconds(hammer.time);i++{
 		for b:=0;b<hammer.perSecond;b++{
-			idx := r1.Intn(len(hammer.url.Appendages))
-			go makeTypedRequest(hammer.url.Base+hammer.url.Appendages[idx].Ext,strings.ToUpper(hammer.url.Appendages[idx].Type),outboundIndex)
+			fullURL := ""
+			typeOf := ""
+			if len(hammer.url.Appendages)== 0{
+				fullURL = hammer.url.Base
+				typeOf = "GET"
+			}else{
+				idx := r1.Intn(len(hammer.url.Appendages))
+				fullURL = hammer.url.Base+hammer.url.Appendages[idx].Ext
+				typeOf = strings.ToUpper(hammer.url.Appendages[idx].Type)
+			}
+
+			go makeTypedRequest(fullURL,typeOf,outboundIndex)
 			time.Sleep(time.Duration(waitTime)*time.Millisecond)
 		}
 	}
 }
 
 func outboundWatcher(index int){
-	change := <- countChannel[index]
-	outboundReqs[index]+=change
+	for true{
+		change := <- countChannel[index]
+		outboundReqs[index]+=change
+	}
+}
+
+func sumClosureTime(t []TimeClosure,startPercent int, endPercent int)time.Duration{
+	totalTime := time.Duration(0.0)
+	start := int(float64(startPercent)/100*float64(len(t)))
+	end :=  int(float64(endPercent)/100*float64(len(t)))
+	for i:=start;i<end;i++ {
+		totalTime+=t[i].runtime
+	}
+	if end-start == 0{
+		end+=1
+	}
+	return totalTime / time.Duration(end-start)
+}
+
+func viewActiveHammers(){
+	for i,h := range activeHammers{
+		fmt.Printf("Hammering %s %d times per second\n%d requests made, %d requests pending\nAverage response time: %v\nAverage response time (first 10%%): %v\nAverage response time (latest 10%%): %v\n\n",h.url.Base,h.perSecond,len(closures[i]),outboundReqs[i],sumClosureTime(closures[i],0,100),sumClosureTime(closures[i],0,10),sumClosureTime(closures[i],90,100))
+	}
 }
 
 func console(){
 	for true {
-		fmt.Println("Would you like to create a hammer (c) run a hammer (r), or kill all hammers and quit (q)?: ")
+		fmt.Println("Would you like to create a hammer (c), run a hammer (r), view active hammers (v), or kill all hammers and quit (q)?: ")
 		var response string
 		fmt.Scanln(&response)
 		if response == "c"{
@@ -251,9 +282,15 @@ func console(){
 			}
 			outboundReqs = append(outboundReqs,0)
 			countChannel = append(countChannel,make(chan int,200))
+			activeHammers = append(activeHammers,hammers[index])
+			closures = append(closures,make([]TimeClosure,0))
 			go runHammer(hammers[index],len(outboundReqs)-1)
+			go outboundWatcher(len(outboundReqs)-1)
+			fmt.Println("Started hammering: "+hammers[index].url.Base)
+		}else if response == "v"{
+			viewActiveHammers()
 		}else if response == "q"{
-			//write all files first
+			logAllTimeClosures()
 			return
 		}
 	}
@@ -284,6 +321,27 @@ func textToHammer(text string)Hammer{
 	}
 }
 
+
+func timeClosureArrToText(t []TimeClosure)string{
+	sb := strings.Builder{}
+	totalTime := time.Duration(0)
+	for _,tc := range t{
+		sb.WriteString(fmt.Sprintf("URL: %s    Time: %v    Pending Requests: %d\n",tc.URL,tc.runtime,tc.pending))
+		totalTime+=tc.runtime
+	}
+	body := fmt.Sprintf("Average time: %v\n\n\n\n%s",totalTime/time.Duration(len(t)),sb.String())
+	return body
+}
+
+func logAllTimeClosures(){
+	for i,list := range closures{
+		fileName := fmt.Sprintf("files/%s_%d.txt",activeHammers[i].name,activeHammers[i].perSecond)
+		body := timeClosureArrToText(list)
+		fmtBody := fmt.Sprintf("Name: %s\nBase URL: %s\nRequests per second: %d\n%s",activeHammers[i].name,activeHammers[i].url.Base,activeHammers[i].perSecond,body)
+		Write(fileName,fmtBody)
+	}
+}
+
 func loadHammers(){
 	fileText := ReadToString("files/hammers.txt")
 	lines := strings.Split(fileText,"\n")
@@ -303,3 +361,17 @@ func main(){
 }
 
 
+/*
+Bigger goals:
+
+Allow offloading of structs from closures memory, these will overload it pretty quickly
+Offload them to files
+
+Allow uploading of JSON files to an API
+
+Record errors
+
+Show average start time first ~10% of requests and average end time last ~10% of requests difference
+
+Allow dynamic changing of reqs/second
+ */
