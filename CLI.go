@@ -41,10 +41,13 @@ type TimeClosure struct {
 	end time.Time
 
 }
+
+var outboundReqs = make([]int,0)
 var hammers []Hammer
 var s1 = rand.NewSource(time.Now().UnixNano())
 var r1 = rand.New(s1)
 var closures []TimeClosure
+var countChannel = make([]chan int,0)
 
 
 func takeURLInfo()URL{
@@ -186,41 +189,48 @@ func timeToSeconds(time fmtTime)int{
 	return time.Hours*3600+time.Minutes*60+time.Seconds
 }
 
-func logCall(start time.Time,end time.Time,URL string,reqType string){
+func logCall(start time.Time,end time.Time,URL string,reqType string,outboundIdx int){
 	closures = append(closures,TimeClosure{
 		URL:   URL,
-		Type:  "GET",
+		Type:  reqType,
 		start: start,
 		end:   end,
 	})
+	countChannel[outboundIdx]<--1
 	fmt.Println(URL)
 	fmt.Println(end.Sub(start))
 }
 
-func makeTypedRequest(URL string,reqType string){
+func makeTypedRequest(URL string,reqType string,outboundIdx int){
 	//save errors, concurrent write to closures as channel
 	start := time.Now()
+	countChannel[outboundIdx]<-1
 	if reqType == "GET"{
 		_,_ = http.Get(URL)
 		end := time.Now()
-		logCall(start,end,URL,"GET")
+		logCall(start,end,URL,"GET",outboundIdx)
 	}else if reqType == "POST"{
 		_,_ = http.Post(URL,"application/json",nil)
 		end := time.Now()
-		logCall(start,end,URL,"POST")
+		logCall(start,end,URL,"POST",outboundIdx)
 	}
 
 }
 
-func runHammer(hammer Hammer){
+func runHammer(hammer Hammer,outboundIndex int){
 	waitTime := int(1.0/float64(hammer.perSecond)*1000)
 	for i:=0;i<timeToSeconds(hammer.time);i++{
 		for b:=0;b<hammer.perSecond;b++{
 			idx := r1.Intn(len(hammer.url.Appendages))
-			go makeTypedRequest(hammer.url.Base+hammer.url.Appendages[idx].Ext,strings.ToUpper(hammer.url.Appendages[idx].Type))
+			go makeTypedRequest(hammer.url.Base+hammer.url.Appendages[idx].Ext,strings.ToUpper(hammer.url.Appendages[idx].Type),outboundIndex)
 			time.Sleep(time.Duration(waitTime)*time.Millisecond)
 		}
 	}
+}
+
+func outboundWatcher(index int){
+	change := <- countChannel[index]
+	outboundReqs[index]+=change
 }
 
 func console(){
@@ -239,7 +249,9 @@ func console(){
 			if err != nil{
 				continue
 			}
-			go runHammer(hammers[index])
+			outboundReqs = append(outboundReqs,0)
+			countChannel = append(countChannel,make(chan int,200))
+			go runHammer(hammers[index],len(outboundReqs)-1)
 		}else if response == "q"{
 			//write all files first
 			return
