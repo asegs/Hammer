@@ -49,7 +49,7 @@ var r1 = rand.New(s1)
 var closures [][]TimeClosure
 var countChannel = make([]chan int,0)
 var activeHammers []Hammer
-
+var averageTimeClosures [][]TimeClosure
 
 func takeURLInfo()URL{
 	scanner := bufio.NewScanner(os.Stdin)
@@ -217,9 +217,11 @@ func makeTypedRequest(URL string,reqType string,outboundIdx int){
 
 }
 
-func runHammer(hammer Hammer,outboundIndex int){
-	waitTime := int(1.0/float64(hammer.perSecond)*1000)
-	for i:=0;i<timeToSeconds(hammer.time);i++{
+func runHammer(index int,outboundIndex int){
+	h := activeHammers[index]
+	for i:=0;i<timeToSeconds(h.time);i++{
+		hammer := activeHammers[index]
+		waitTime := int(1.0/float64(hammer.perSecond)*1000)
 		for b:=0;b<hammer.perSecond;b++{
 			fullURL := ""
 			typeOf := ""
@@ -260,13 +262,45 @@ func sumClosureTime(t []TimeClosure,startPercent int, endPercent int)time.Durati
 
 func viewActiveHammers(){
 	for i,h := range activeHammers{
-		fmt.Printf("Hammering %s %d times per second\n%d requests made, %d requests pending\nAverage response time: %v\nAverage response time (first 10%%): %v\nAverage response time (latest 10%%): %v\n\n",h.url.Base,h.perSecond,len(closures[i]),outboundReqs[i],sumClosureTime(closures[i],0,100),sumClosureTime(closures[i],0,10),sumClosureTime(closures[i],90,100))
+		fmt.Println(len(averageTimeClosures[i]))
+		fmt.Printf("Hammering %s %d times per second\n%d requests made, %d requests pending\nAverage response time: %v\nAverage response time (first 10%%): %v\nAverage response time (latest 10%%): %v\nFirst response time: %v  Latest response time: %v\n\n",h.url.Base,h.perSecond,len(averageTimeClosures[i])*(h.perSecond/2),outboundReqs[i],sumClosureTime(averageTimeClosures[i],0,100),sumClosureTime(averageTimeClosures[i],0,10),sumClosureTime(averageTimeClosures[i],90,100),averageTimeClosures[i][0].runtime,averageTimeClosures[i][len(averageTimeClosures[i])-1].runtime)
 	}
+}
+
+func setNewHammerRate(){
+	for i,h := range activeHammers{
+		fmt.Printf("%d.) Name: %s  Hammers per second: %d\n",i,h.name,h.perSecond)
+	}
+	fmt.Println("Enter the index of the hammer to modify, followed by the new per second rate (ex. 2 150) or press enter to not change anything:")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	text := scanner.Text()
+	if text == ""{
+		return
+	}else{
+		tokens := strings.Split(text," ")
+		if len(tokens)!= 2{
+			fmt.Println("Invalid format")
+			return
+		}
+		index,err := strconv.Atoi(tokens[0])
+		if err != nil{
+			fmt.Println("Invalid index")
+			return
+		}
+		perSecond,err := strconv.Atoi(tokens[1])
+		if err != nil{
+			fmt.Println("Invalid index")
+			return
+		}
+		activeHammers[index].perSecond = perSecond
+	}
+
 }
 
 func console(){
 	for true {
-		fmt.Println("Would you like to create a hammer (c), run a hammer (r), view active hammers (v), or kill all hammers and quit (q)?: ")
+		fmt.Println("Would you like to create a hammer (c), run a hammer (r), view active hammers (v), set hammer rate (s), or kill all hammers and quit (q)?: ")
 		var response string
 		fmt.Scanln(&response)
 		if response == "c"{
@@ -284,11 +318,15 @@ func console(){
 			countChannel = append(countChannel,make(chan int,200))
 			activeHammers = append(activeHammers,hammers[index])
 			closures = append(closures,make([]TimeClosure,0))
-			go runHammer(hammers[index],len(outboundReqs)-1)
+			averageTimeClosures = append(averageTimeClosures,make([]TimeClosure,0))
+			go runHammer(index,len(outboundReqs)-1)
 			go outboundWatcher(len(outboundReqs)-1)
+			go offloader(index)
 			fmt.Println("Started hammering: "+hammers[index].url.Base)
 		}else if response == "v"{
 			viewActiveHammers()
+		}else if response=="s"{
+			setNewHammerRate()
 		}else if response == "q"{
 			logAllTimeClosures()
 			return
@@ -321,6 +359,38 @@ func textToHammer(text string)Hammer{
 	}
 }
 
+func offload(count int,index int){
+	if len(closures[index])>count{
+		toOffload := closures[index][0:count]
+		closures[index] = closures[index][count:]
+		filename := nameActiveHammer(index)
+		sb := strings.Builder{}
+		if _, err := os.Stat(filename); !os.IsNotExist(err){
+			sb.WriteString(ReadToString(filename)+"\n")
+		}else{
+			sb.WriteString(fmt.Sprintf("Name: %s\nBase URL: %s\nRequests per second: %d\n\n\n\n",activeHammers[index].name,activeHammers[index].url.Base,activeHammers[index].perSecond))
+		}
+		avg := sumClosureTime(toOffload,0,100)
+		sb.WriteString(fmt.Sprintf("%v\n",time.Now()))
+		sb.WriteString(fmt.Sprintf("Per second: %d, average time: %v\n",count*2,avg))
+		averageTimeClosures[index] = append(averageTimeClosures[index],TimeClosure{
+			URL:     activeHammers[index].url.Base,
+			Type:    "GET",
+			runtime: avg,
+			pending: outboundReqs[index],
+		})
+		Write(filename,sb.String())
+	}
+
+}
+
+func offloader(index int){
+	for true{
+		offload(activeHammers[index].perSecond/2,index)
+		time.Sleep(30*time.Millisecond)
+	}
+}
+
 
 func timeClosureArrToText(t []TimeClosure)string{
 	sb := strings.Builder{}
@@ -333,12 +403,17 @@ func timeClosureArrToText(t []TimeClosure)string{
 	return body
 }
 
+func nameActiveHammer(i int)string{
+	return fmt.Sprintf("files/%s.txt",activeHammers[i].name)
+}
+
 func logAllTimeClosures(){
-	for i,list := range closures{
-		fileName := fmt.Sprintf("files/%s_%d.txt",activeHammers[i].name,activeHammers[i].perSecond)
-		body := timeClosureArrToText(list)
-		fmtBody := fmt.Sprintf("Name: %s\nBase URL: %s\nRequests per second: %d\n%s",activeHammers[i].name,activeHammers[i].url.Base,activeHammers[i].perSecond,body)
-		Write(fileName,fmtBody)
+	for i,_ := range closures{
+		offload(len(closures[i]),i)
+		//fileName := nameActiveHammer(i)
+		//body := timeClosureArrToText(list)
+		//fmtBody := fmt.Sprintf("Name: %s\nBase URL: %s\nRequests per second: %d\n%s",activeHammers[i].name,activeHammers[i].url.Base,activeHammers[i].perSecond,body)
+		//Write(fileName,fmtBody)
 	}
 }
 
@@ -364,14 +439,13 @@ func main(){
 /*
 Bigger goals:
 
-Allow offloading of structs from closures memory, these will overload it pretty quickly
-Offload them to files
+Hashmap of unique URLs, some take longer than others
 
 Allow uploading of JSON files to an API
 
 Record errors
 
-Show average start time first ~10% of requests and average end time last ~10% of requests difference
+Show average start time first ~10% of requests and average end time last ~10% of requests difference (in file)
 
 Allow dynamic changing of reqs/second
  */

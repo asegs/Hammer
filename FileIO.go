@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -67,5 +66,4 @@ func Write(filename string,body string) {
 	if err2 != nil {
 		log.Fatal(err2)
 	}
-	fmt.Printf("Wrote to file: %s\n",filename)
 }
