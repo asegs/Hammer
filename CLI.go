@@ -447,5 +447,5 @@ Record errors
 
 Show average start time first ~10% of requests and average end time last ~10% of requests difference (in file)
 
-Allow dynamic changing of reqs/second
- */
+GUI ;)
+*/
